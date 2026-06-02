@@ -85,6 +85,11 @@ func main() {
 
 			auditHandler := handlers.NewAuditLogHandler(db)
 			protected.GET("/audit/logs", middleware.RequireRole("admin"), auditHandler.List)
+
+			userHandler := handlers.NewUserHandler(db)
+			protected.GET("/users/:id", userHandler.GetUser)
+			protected.PUT("/users/:id", userHandler.UpdateUser)
+			protected.DELETE("/users/:id", userHandler.DeleteUser)
 		}
 	}
 
