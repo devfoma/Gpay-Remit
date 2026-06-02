@@ -1,14 +1,13 @@
 use gpay_remit_contracts::payment_escrow::{
     Asset, DisputeReason, Error, EscrowStatus, NotificationConfig, PaymentEscrowContract,
-    PaymentEscrowContractClient, RecurringConfig, RefundReason, ResolutionOutcome,
+    PaymentEscrowContractClient, RecurringConfig, RefundReason, ResolutionOutcome, Milestone, InsuranceConfig, EscrowInsurance, 
+    DelegationPermissions, DelegationEntry, EscrowAnalytics, CancellationConfig,
 };
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events as _, Ledger},
     token, vec, Address, BytesN, Env, FromVal, Map, String, Symbol, Vec,
 };
-use gpay_remit_contracts::payment_escrow::{PaymentEscrowContract, PaymentEscrowContractClient, Asset, EscrowStatus, Error, RefundReason, DisputeReason, ResolutionOutcome, Milestone, InsuranceConfig, EscrowInsurance, DelegationPermissions, DelegationEntry, EscrowAnalytics};
-use soroban_sdk::{testutils::{Address as _, Ledger, Events as _}, token, Address, Env, String, symbol_short, Symbol, FromVal, BytesN, vec, Vec};
 
 fn create_token_contract<'a>(
     env: &Env,
@@ -1718,4 +1717,84 @@ fn test_get_user_statistics() {
     assert_eq!(stats.total_escrows, 2);
     assert_eq!(stats.total_volume, 3000);
     assert_eq!(stats.average_amount, 1500);
+}
+
+// ============================================================================
+// CANCELLATION WITH PENALTIES TESTS
+// ============================================================================
+
+#[test]
+fn test_set_cancellation_config() {
+    let env = Env::default();
+    let (client, _admin, sender, recipient, _token, asset) = setup_test(&env);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &1000, &asset, &2000, &String::from_str(&env, "Test"));
+
+    let config = CancellationConfig {
+        penalty_percentage: 500, // 5%
+        recipient_compensation: 200, // 2%
+    };
+
+    client.set_cancellation_config(&escrow_id, &sender, &config);
+
+    let fetched_config = client.get_cancellation_config(&escrow_id).unwrap();
+    assert_eq!(fetched_config.penalty_percentage, 500);
+    assert_eq!(fetched_config.recipient_compensation, 200);
+}
+
+#[test]
+fn test_cancel_escrow_with_penalties() {
+    let env = Env::default();
+    let (client, admin, sender, recipient, (token, token_admin), asset) = setup_test(&env);
+
+    let amount = 1000;
+    token_admin.mint(&sender, &amount);
+
+    let fee_wallet = Address::generate(&env);
+    client.set_fee_wallet(&admin, &fee_wallet);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &amount, &asset, &2000, &String::from_str(&env, "Test"));
+    client.deposit(&escrow_id, &sender, &amount, &token.address);
+
+    let config = CancellationConfig {
+        penalty_percentage: 1000, // 10% -> 100
+        recipient_compensation: 500, // 5% -> 50
+    };
+    client.set_cancellation_config(&escrow_id, &sender, &config);
+
+    // Cancel escrow
+    client.cancel_escrow(&escrow_id, &sender, &token.address, &String::from_str(&env, "Cancel"));
+
+    // Check balances
+    // sender refund: 1000 - 100 - 50 = 850
+    assert_eq!(token.balance(&sender), 850);
+    // fee wallet gets penalty: 100
+    assert_eq!(token.balance(&fee_wallet), 100);
+    // recipient gets compensation: 50
+    assert_eq!(token.balance(&recipient), 50);
+
+    let escrow = client.get_escrow(&escrow_id).unwrap();
+    assert_eq!(escrow.status, EscrowStatus::Cancelled);
+}
+
+#[test]
+fn test_cancel_escrow_no_config() {
+    let env = Env::default();
+    let (client, _admin, sender, recipient, (token, token_admin), asset) = setup_test(&env);
+
+    let amount = 1000;
+    token_admin.mint(&sender, &amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &amount, &asset, &2000, &String::from_str(&env, "Test"));
+    client.deposit(&escrow_id, &sender, &amount, &token.address);
+
+    client.cancel_escrow(&escrow_id, &sender, &token.address, &String::from_str(&env, "Cancel"));
+
+    // Check balances
+    // sender refund full amount
+    assert_eq!(token.balance(&sender), 1000);
+    assert_eq!(token.balance(&recipient), 0);
+
+    let escrow = client.get_escrow(&escrow_id).unwrap();
+    assert_eq!(escrow.status, EscrowStatus::Cancelled);
 }
